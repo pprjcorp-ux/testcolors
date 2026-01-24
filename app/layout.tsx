@@ -1,16 +1,20 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Syne, Plus_Jakarta_Sans } from "next/font/google";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+// Playful, distinctive display font with geometric character
+const syne = Syne({
+  variable: "--font-display",
   subsets: ["latin"],
+  weight: ["400", "500", "600", "700", "800"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+// Friendly, modern body font
+const jakarta = Plus_Jakarta_Sans({
+  variable: "--font-body",
   subsets: ["latin"],
+  weight: ["300", "400", "500", "600", "700"],
 });
 
 export const metadata: Metadata = {
@@ -28,7 +32,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#a855f7",
+  themeColor: "#FF6B6B",
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
@@ -45,7 +49,7 @@ export default function RootLayout({
         <link rel="apple-touch-icon" href="/icons/icon-192.png" />
       </head>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen bg-gradient-to-br from-rose-50 via-white to-amber-50 dark:from-gray-900 dark:via-gray-900 dark:to-gray-800`}
+        className={`${syne.variable} ${jakarta.variable} font-body antialiased min-h-screen bg-cream dark:bg-gray-950 overflow-x-hidden`}
       >
         <ThemeProvider>
           {children}
