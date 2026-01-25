@@ -13,9 +13,16 @@ export function PhotoUpload({ onPhotoSelect, isLoading }: PhotoUploadProps) {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB in bytes
+
   const handleFile = useCallback((file: File) => {
     if (!file.type.startsWith('image/')) {
       alert('Por favor, selecione uma imagem válida.');
+      return;
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      alert('A imagem deve ter no máximo 10MB. Por favor, selecione uma imagem menor.');
       return;
     }
 
