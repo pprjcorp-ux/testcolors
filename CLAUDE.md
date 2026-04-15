@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **AutoTasker** is a two-tier agentic SaaS monorepo. Users describe repetitive tasks in chat; a synchronous **Meta-Agent** (Tier 1) checks feasibility against a strict Tool Registry, designs an SOP, and persists it as a draft Worker. A scheduled **Worker Agent** (Tier 2) is then compiled per execution from that SOP and runs autonomously via Inngest.
 
-Status: **Phase 1 MVP scaffold**. The Tier-1 graph is fully wired; the Tier-2 worker is a deterministic step-loop stub. Auth, OAuth tools, Inngest dynamic registration, and Browserbase are tracked in `docs/ROADMAP.md`.
+Status: **Phase 4 hardened MVP**. Tier-1 graph, Supabase auth end-to-end, LLM-driven Tier-2 worker, rate limiting, CI, and error sanitization are all wired. OAuth tools, Inngest dynamic registration, and Browserbase are tracked in `docs/ROADMAP.md`.
 
 ## Repo layout
 
@@ -32,6 +32,7 @@ uvicorn autotasker_backend.main:app --reload --port 8000
 pytest                                               # all tests
 pytest tests/test_sop_schema.py                      # single file
 pytest tests/test_sop_schema.py::test_sop_round_trip # single test
+pytest tests/test_worker_graph.py -v                 # worker (uses scripted LLM double)
 ruff check src tests
 mypy src
 ```
@@ -47,7 +48,8 @@ cp .env.local.example .env.local
 npm run dev          # Next.js dev server on :3000
 npm run build
 npm run lint
-npm run typecheck    # tsc --noEmit
+npm run typecheck          # tsc --noEmit
+npm run types:generate     # regenerate src/lib/types-generated.ts from FastAPI /openapi.json
 ```
 
 The frontend talks to FastAPI **only** through the Next.js rewrite at `/api/backend/*` (configured in `frontend/next.config.ts`). The browser never sees the backend origin directly. `BACKEND_URL` env var controls the rewrite target.
@@ -142,6 +144,17 @@ Three tables: `users` (mirror of `auth.users`), `agents` (SOPs + triggers + stat
 - `frontend/src/lib/types.ts` is **hand-written** to mirror the Pydantic schemas in `backend/src/autotasker_backend/schemas/`. Phase 2 will generate this from the FastAPI OpenAPI schema. Until then, keep them in sync manually whenever a schema changes.
 - `frontend/src/lib/api.ts::streamForge()` is an async generator that parses SSE frames into `ForgeEvent`s. The event shapes are union-typed in `types.ts` and produced in `backend/src/autotasker_backend/api/chat.py::_stream_architect`. **These two files must stay in sync.**
 - `forge-chat.tsx` consumes the SSE stream and renders both a chat bubble list and a "pipeline rail" showing each graph node as it executes.
+
+### Production hardening (Phase 4)
+
+- **Rate limiting** — `core/rate_limit.py::limiter` is an in-memory `slowapi.Limiter` keyed by IP. `/chat/stream` is capped at `10/minute`, `/inngest/execute` at `30/minute`. Installed as `SlowAPIMiddleware` in `main.py`. When you add a hot route, decorate it `@limiter.limit(...)` **and** declare a `request: Request` parameter so slowapi can read the client IP.
+- **Client-safe errors** — every bare `except Exception` in a router or graph node funnels through `core/errors.py::client_safe_error`, which maps known exception classes to stable user-facing messages and attaches a 12-char trace id for support lookups. Never yield `str(exc)` to the client directly.
+- **SSE cancellation** — `_stream_architect` re-raises `asyncio.CancelledError` so aborted fetches don't spam tracebacks. Do the same in any new long-lived async generator.
+- **Auth** — every FastAPI route that touches user data uses `Depends(get_current_user_id)` from `core/auth.py`. The Inngest webhook uses `Depends(require_inngest_secret)` instead. The frontend attaches the Supabase session's `access_token` as a Bearer header in `lib/api.ts::getAuthHeader()`. `DEMO_USER_ID` is gone.
+- **Ownership 404s** — `api/agents.py::_load_owned_or_404` always returns 404 (not 403) when the authenticated user doesn't own a row, so row existence doesn't leak across users.
+- **Bounded UI state** — `components/forge-chat.tsx::appendBounded` caps `messages` and `pipeline` at 200 entries so a long session can't blow up the client.
+- **OpenAPI types drift check** — `npm run types:generate` regenerates `src/lib/types-generated.ts` from `/openapi.json`. Treat it as a parallel check on the hand-written `src/lib/types.ts`; diffing the two catches silent schema drift until Phase 2b replaces the hand-written file entirely.
+- **CI** — `.github/workflows/ci.yml` runs ruff + mypy + pytest on every push, and Next.js lint + typecheck + build alongside. Supabase env vars for the frontend build step are dummy values; CI does not need real credentials.
 
 ## Conventions worth preserving
 

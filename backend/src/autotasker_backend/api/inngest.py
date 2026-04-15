@@ -17,11 +17,13 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.auth import require_inngest_secret
+from ..core.errors import client_safe_error
 from ..core.logging import get_logger
+from ..core.rate_limit import limiter
 from ..db.repositories import AgentRepository, ExecutionLogRepository
 from ..graphs.worker import build_worker_graph
 from ..schemas.log import ExecutionLogRead, ExecutionStatus
@@ -42,7 +44,11 @@ class ExecuteAgentEvent(BaseModel):
     response_model=ExecutionLogRead,
     dependencies=[Depends(require_inngest_secret)],
 )
-async def execute_agent(event: ExecuteAgentEvent) -> ExecutionLogRead:
+@limiter.limit("30/minute")
+async def execute_agent(
+    request: Request,  # required by slowapi to read the client IP
+    event: ExecuteAgentEvent,
+) -> ExecutionLogRead:
     agents = AgentRepository()
     logs = ExecutionLogRepository()
 
@@ -68,11 +74,8 @@ async def execute_agent(event: ExecuteAgentEvent) -> ExecutionLogRead:
         )
     except Exception as exc:  # noqa: BLE001 — full traceback stays in logs only
         log.exception("worker.crashed", log_id=str(log_row.id))
-        # Store only the exception class name in the DB row — the raw
-        # message could leak credentials embedded in provider errors
-        # (e.g. psycopg connection strings, httpx response bodies).
         return logs.finish(
             log_id=log_row.id,
             status=ExecutionStatus.FAILED,
-            error_message=f"Worker crashed: {type(exc).__name__}",
+            error_message=client_safe_error(exc),
         )

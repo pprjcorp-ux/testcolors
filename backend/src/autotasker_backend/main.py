@@ -12,11 +12,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from . import __version__
 from .api import agents, chat, health, inngest
 from .core.config import get_settings
 from .core.logging import configure_logging, get_logger
+from .core.rate_limit import limiter
 
 # Importing the tools package registers the built-in tools at startup.
 from . import tools  # noqa: F401  pylint: disable=unused-import
@@ -47,6 +51,12 @@ def create_app() -> FastAPI:
         redoc_url=None,
         lifespan=lifespan,
     )
+
+    # Rate limiter must be installed before routers are included so
+    # decorated routes pick it up.
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
 
     app.add_middleware(
         CORSMiddleware,

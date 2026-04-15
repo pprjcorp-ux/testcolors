@@ -60,3 +60,13 @@ LangGraph nodes never import the Supabase SDK directly. They go through `AgentRe
 ## Modern LangGraph only
 
 `StateGraph`, `add_messages`, `with_structured_output`, `astream(stream_mode=...)`. Do not introduce deprecated LangChain `Chain`/`LLMChain` constructs.
+
+## Phase-4 hardening (non-negotiable)
+
+- **Auth**: every user-facing route uses `Depends(get_current_user_id)` from `core/auth.py`. The Inngest webhook uses `Depends(require_inngest_secret)`. Never trust a user id from the request body.
+- **Ownership**: `api/agents.py::_load_owned_or_404` returns 404 (not 403) on owner mismatch. Do not add a 403 path.
+- **Rate limiting**: new hot routes must decorate with `@limiter.limit(...)` from `core/rate_limit.py` and declare a `request: Request` parameter so slowapi can read the client IP. Do not rename the parameter.
+- **Client-safe errors**: never `yield str(exc)` or write raw exception messages into `execution_logs.error_message`. Route every bare `except Exception` through `core/errors.py::client_safe_error`.
+- **SSE cancellation**: long-lived async generators re-raise `asyncio.CancelledError` (see `api/chat.py::_stream_architect`) so aborted fetches don't spam the logs.
+- **Tool retries**: call tools via `ToolSpec.run(...)`, not `ToolSpec.handler(...)` directly — `.run` wraps the handler in `tenacity.AsyncRetrying` with exponential backoff honouring `ToolSpec.max_retries`.
+- **Worker LLM scope**: `decide_node` passes `REGISTRY.as_langchain_tools(only=[...sop.tool_ids])` to `bind_tools`. Never bind the full catalogue.

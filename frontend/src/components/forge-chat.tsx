@@ -35,6 +35,18 @@ interface PipelineEvent {
   detail?: string;
 }
 
+// Maximum chat history kept in state. Older bubbles are pruned from
+// the front so a long-running conversation can't accumulate unbounded
+// memory on low-powered clients.
+const MAX_MESSAGES = 200;
+
+function appendBounded<T>(list: T[], next: T): T[] {
+  const combined = [...list, next];
+  return combined.length > MAX_MESSAGES
+    ? combined.slice(combined.length - MAX_MESSAGES)
+    : combined;
+}
+
 export function ForgeChat() {
   const [messages, setMessages] = useState<ChatBubble[]>([]);
   const [pipeline, setPipeline] = useState<PipelineEvent[]>([]);
@@ -52,7 +64,7 @@ export function ForgeChat() {
       role: "user",
       content: text,
     };
-    setMessages((m) => [...m, userBubble]);
+    setMessages((m) => appendBounded(m, userBubble));
     setInput("");
     setBusy(true);
     setPipeline([]);
@@ -68,14 +80,13 @@ export function ForgeChat() {
         applyEvent(event);
       }
     } catch (err) {
-      setMessages((m) => [
-        ...m,
-        {
+      setMessages((m) =>
+        appendBounded(m, {
           id: crypto.randomUUID(),
           role: "assistant",
           content: `Stream error: ${err instanceof Error ? err.message : String(err)}`,
-        },
-      ]);
+        })
+      );
     } finally {
       setBusy(false);
       abortRef.current = null;
@@ -93,29 +104,27 @@ export function ForgeChat() {
             (event.sop_name ? `${event.sop_name} (${event.sop_step_count} steps)` : undefined) ??
             event.error ??
             event.status;
-          setPipeline((p) => [...p, { node: event.node, status: event.status, ok, detail }]);
+          setPipeline((p) => appendBounded(p, { node: event.node, status: event.status, ok, detail }));
           return;
         }
         case "message":
-          setMessages((m) => [
-            ...m,
-            {
+          setMessages((m) =>
+            appendBounded(m, {
               id: crypto.randomUUID(),
               role: "assistant",
               content: event.content,
               node: event.node,
-            },
-          ]);
+            })
+          );
           return;
         case "error":
-          setMessages((m) => [
-            ...m,
-            {
+          setMessages((m) =>
+            appendBounded(m, {
               id: crypto.randomUUID(),
               role: "assistant",
               content: `Backend error: ${event.error}`,
-            },
-          ]);
+            })
+          );
           return;
       }
     }

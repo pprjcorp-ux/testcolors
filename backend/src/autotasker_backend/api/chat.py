@@ -10,18 +10,21 @@ lives in :mod:`autotasker_backend.api.inngest`.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.auth import get_current_user_id
+from ..core.errors import client_safe_error
 from ..core.logging import get_logger
+from ..core.rate_limit import limiter
 from ..graphs.architect import build_architect_graph
 from ..graphs.state import ArchitectState
 
@@ -95,25 +98,28 @@ async def _stream_architect(
                     payload["error"] = partial["error"]
 
                 yield _sse(payload)
-    except Exception:  # noqa: BLE001 — full traceback stays in logs only
+    except asyncio.CancelledError:
+        # Client disconnected — no need to yield anything; upstream
+        # closes the response. Let the exception propagate so the
+        # ASGI server knows the generator is done.
+        log.info("chat.stream_cancelled")
+        raise
+    except Exception as exc:  # noqa: BLE001 — full traceback stays in logs only
         log.exception("chat.stream_failed")
-        yield _sse(
-            {
-                "type": "error",
-                "error": "The Architect ran into an internal error. Please try again.",
-            }
-        )
+        yield _sse({"type": "error", "error": client_safe_error(exc)})
 
     yield "data: [DONE]\n\n"
 
 
 @router.post("/stream")
+@limiter.limit("10/minute")
 async def chat_stream(
-    request: ChatRequest,
+    request: Request,  # required by slowapi to read the client IP
+    body: ChatRequest,
     user_id: UUID = Depends(get_current_user_id),
 ) -> StreamingResponse:
     return StreamingResponse(
-        _stream_architect(request, user_id),
+        _stream_architect(body, user_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

@@ -38,4 +38,12 @@ Components in `src/components/ui/` are vendored Shadcn primitives — do not mod
 
 - Page files (`app/**/page.tsx`) are **Server Components** by default. Keep them small — they should mostly compose Client Components.
 - Components that touch React state, browser APIs, or call `streamForge()` must declare `"use client"` at the top of the file.
-- Never call `getSupabaseBrowser()` from a Server Component.
+- Never call `getSupabaseBrowser()` from a Server Component. Use `getSupabaseServer()` / `getCurrentUserId()` from `lib/supabase-server.ts` instead.
+
+## Phase-4 hardening
+
+- **Auth**: every call in `lib/api.ts` goes through `getAuthHeader()` which reads the Supabase session's access token. Do not bypass it with a raw `fetch` from a component.
+- **Middleware-protected routes**: `/forge` and `/agents` are gated by `middleware.ts`. Unauthenticated users are redirected to `/login?next=...`. The `(dashboard)/layout.tsx` Server Component re-checks the session as a defence-in-depth layer.
+- **Bounded state**: any unbounded `setState([...m, next])` pattern in chat/log surfaces must use `appendBounded` (see `components/forge-chat.tsx`) so long sessions can't accumulate memory on the client.
+- **Error boundaries**: every route group under `app/(dashboard)/` should have an `error.tsx` boundary. Add one when you introduce a new group.
+- **Types drift check**: the hand-written `lib/types.ts` is the source of truth for now, but `npm run types:generate` produces `lib/types-generated.ts` from the FastAPI OpenAPI schema — diffing the two is how we catch silent schema drift until Phase 2b replaces the hand-written file.

@@ -33,6 +33,7 @@ dependencies = [
   # Observability / utils
   "structlog>=24.4.0",
   "tenacity>=9.0.0",  # wired by the Worker graph's per-step retry loop
+  "slowapi>=0.1.9",   # rate limiting middleware for /chat and /inngest
   "python-dotenv>=1.0.1",
 ]
 
