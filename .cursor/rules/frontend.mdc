@@ -1,0 +1,41 @@
+---
+description: Frontend conventions — Next.js 15 App Router, SSE consumer, types mirror
+globs: frontend/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# Frontend invariants
+
+## Backend access — never direct
+
+The frontend talks to FastAPI **only** through the Next.js rewrite at `/api/backend/*` (configured in `frontend/next.config.ts`). The browser never sees the backend origin directly. `BACKEND_URL` env var controls the rewrite target.
+
+All HTTP calls go through `frontend/src/lib/api.ts`. Do not introduce `fetch()` calls to the backend from components.
+
+## Hand-written types mirror
+
+`frontend/src/lib/types.ts` is **hand-written** to mirror the Pydantic schemas in `backend/src/autotasker_backend/schemas/`. Phase 2 will generate this from the FastAPI OpenAPI schema. **Until then, keep them in sync manually whenever a schema changes.**
+
+When you change a Pydantic model, update the corresponding TypeScript interface in the same change.
+
+## SSE event contract
+
+`frontend/src/lib/api.ts::streamForge()` is an async generator that parses SSE frames into `ForgeEvent`s. The event shapes are union-typed in `types.ts` and produced in `backend/src/autotasker_backend/api/chat.py::_stream_architect`. **These two files must stay in sync.**
+
+`forge-chat.tsx` consumes the SSE stream and renders both a chat bubble list and a "pipeline rail" showing each graph node as it executes. Pattern-match on the discriminated `ForgeEvent.type` field — never narrow by checking for property existence.
+
+## TypeScript strict mode
+
+- `tsconfig.json` has `strict: true` and `experimental.typedRoutes: true`.
+- Route props and `<Link href={...}>` must use the `Route` type from `next` — string literals will fail typecheck.
+- No `any`. No `@ts-ignore`. Prefer `unknown` and narrow.
+
+## Shadcn UI primitives
+
+Components in `src/components/ui/` are vendored Shadcn primitives — do not modify their structure beyond cosmetic class changes. New shared components go in `src/components/`. Use `cn(...)` from `@/lib/utils` for conditional class merging.
+
+## Server vs client components
+
+- Page files (`app/**/page.tsx`) are **Server Components** by default. Keep them small — they should mostly compose Client Components.
+- Components that touch React state, browser APIs, or call `streamForge()` must declare `"use client"` at the top of the file.
+- Never call `getSupabaseBrowser()` from a Server Component.

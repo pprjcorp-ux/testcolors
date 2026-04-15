@@ -1,0 +1,62 @@
+---
+description: Backend invariants — LangGraph nodes, Tool Registry, FastAPI routers, LLM provider
+globs: backend/**/*.py
+alwaysApply: false
+---
+
+# Backend invariants
+
+## Tier-1 Meta-Agent (`graphs/architect.py`) — load-bearing guarantees
+
+- The **Feasibility Gate** is a *deterministic-then-LLM* design: `feasibility_node` builds its system prompt from `REGISTRY.manifest()` (the **single source of truth** for platform capabilities), the LLM emits a `FeasibilityReport` via `with_structured_output(...)`, and any hallucinated tool ids are stripped before the conditional edge runs. **Always preserve this filter when modifying the node.**
+- The **Architect** node uses `with_structured_output(SOP)` so an invalid SOP raises *before* `persist_node` ever touches Supabase. **This guarantee is load-bearing — do not weaken it.**
+- The architect graph is compiled once at import time in `api/chat.py` (`_ARCHITECT_GRAPH = build_architect_graph()`) and reused across requests. Nodes must remain stateless.
+
+## Tier-2 Worker (`graphs/worker.py`)
+
+- Compiled **per execution** from a stored SOP via `build_worker_graph(sop)`. The compiled graph carries the SOP's `recursion_limit` via `.with_config({"recursion_limit": ...})`.
+- Honours `SOP.step_timeout_ms` via `asyncio.wait_for` per step.
+- Errors are captured into the state's `error` field, never raised — the `summarize` node always runs so the Inngest log row gets a structured payload.
+
+## Tool Registry (`tools/registry.py`)
+
+A single module-level `REGISTRY = ToolRegistry()` singleton. Tools self-register at import time by calling `REGISTRY.register(ToolSpec(...))` at module scope. The registry is loaded into the FastAPI app via `from . import tools` in `main.py`, which triggers `tools/__init__.py` to import each tool module.
+
+**To add a new tool:**
+
+1. Create `backend/src/autotasker_backend/tools/<your_tool>.py`.
+2. Define a Pydantic `*Input` schema and an `async def _handler(raw_inputs: dict) -> dict`.
+3. Call `REGISTRY.register(ToolSpec(...))` at module scope.
+4. Re-export it from `tools/__init__.py` so the import side-effect runs at startup.
+
+No further wiring is required — the Meta-Agent's manifest is regenerated from the registry on every chat request, and the Worker looks up handlers by `tool_id`.
+
+## Strict separation of concerns (FastAPI routers)
+
+- `api/chat.py` — synchronous chat streaming (Tier 1). Owns `_ARCHITECT_GRAPH`.
+- `api/agents.py` — CRUD over saved agents (used by the My Agents UI).
+- `api/inngest.py` — async worker dispatch (Tier 2). Loads agent → compiles worker graph → records start/finish in `execution_logs`.
+- `api/health.py` — liveness / readiness.
+
+**These four routers must stay independent.** Do not import chat code from inngest or vice versa.
+
+## LLM provider abstraction (`llm/provider.py`)
+
+Both tiers go through `get_meta_agent_llm()` / `get_worker_llm()`. Selection by model id prefix: `claude-*` → `ChatAnthropic`, anything else → `ChatOpenAI`. To swap providers, change the `META_AGENT_MODEL` / `WORKER_MODEL` env vars — no code changes.
+
+Default models: `claude-opus-4-6` (Meta-Agent) and `claude-haiku-4-5-20251001` (Worker). The legacy SKUs from the original spec (`claude-3.7-sonnet`, `claude-3.5-haiku`, `o3-mini`, `gpt-4o-mini`) are intentionally not the defaults.
+
+## Repository pattern (`db/repositories.py`)
+
+LangGraph nodes never import the Supabase SDK directly. They go through `AgentRepository` / `ExecutionLogRepository`, both of which use the **service-role** client from `db/client.py::get_supabase_admin` (RLS bypassed). The browser must never see the service-role key.
+
+## Pydantic & typing rules
+
+- Every cross-boundary model uses `ConfigDict(extra="forbid")`. Do not loosen this.
+- Use `from __future__ import annotations` at the top of new modules.
+- Prefer `collections.abc.AsyncIterator` over `typing.AsyncIterator` (we target 3.12).
+- `core/config.py::Settings` validates required env vars at process start. Add new required vars with a `require_*` helper that raises with an actionable message.
+
+## Modern LangGraph only
+
+`StateGraph`, `add_messages`, `with_structured_output`, `astream(stream_mode=...)`. Do not introduce deprecated LangChain `Chain`/`LLMChain` constructs.

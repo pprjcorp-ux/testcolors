@@ -1,0 +1,17 @@
+---
+description: Git branch policy
+alwaysApply: true
+---
+
+# Branch policy
+
+Development on this branch happens on `claude/autotasker-mvp-init-HBIsc`. Push there with:
+
+```bash
+git push -u origin claude/autotasker-mvp-init-HBIsc
+```
+
+- Do **not** push to `main`.
+- Do **not** open pull requests unless explicitly asked.
+- Prefer creating new commits over amending — never `git commit --amend` published commits.
+- Never use `--no-verify` or other hook-skipping flags. If a hook fails, fix the underlying issue.
