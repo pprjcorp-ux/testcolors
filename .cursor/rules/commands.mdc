@@ -1,0 +1,56 @@
+---
+description: Common development commands for AutoTasker (build, lint, test, run)
+alwaysApply: false
+---
+
+# Development commands
+
+## Backend (Python 3.12+)
+
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env                                 # fill in real secrets
+
+uvicorn autotasker_backend.main:app --reload --port 8000
+
+pytest                                               # all tests
+pytest tests/test_sop_schema.py                      # single file
+pytest tests/test_sop_schema.py::test_sop_round_trip # single test
+ruff check src tests
+mypy src
+```
+
+OpenAPI docs at <http://localhost:8000/docs> when running.
+
+## Frontend (Node 20+)
+
+```bash
+cd frontend
+npm install
+cp .env.local.example .env.local
+npm run dev          # Next.js dev server on :3000
+npm run build
+npm run lint
+npm run typecheck    # tsc --noEmit
+```
+
+The frontend talks to FastAPI **only** through the Next.js rewrite at `/api/backend/*` (configured in `frontend/next.config.ts`). `BACKEND_URL` env var controls the rewrite target.
+
+## Database
+
+```bash
+supabase db push   # picks up infra/supabase/migrations/0001_init.sql
+```
+
+Or paste the SQL into the Supabase dashboard SQL editor.
+
+## End-to-end smoke test
+
+1. Apply the migration to a Supabase project.
+2. Set `ANTHROPIC_API_KEY`, `SUPABASE_*` in `backend/.env`.
+3. Set `NEXT_PUBLIC_SUPABASE_*` and `BACKEND_URL=http://localhost:8000` in `frontend/.env.local`.
+4. Run backend (`uvicorn ...`) and frontend (`npm run dev`) in separate shells.
+5. Open <http://localhost:3000/forge>, type a task like *"Every weekday at 9am, scrape the HN front page and email me the top 5"*, watch the pipeline rail.
+6. Switch to <http://localhost:3000/agents> to see the persisted draft agent.

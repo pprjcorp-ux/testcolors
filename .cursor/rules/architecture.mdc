@@ -1,0 +1,61 @@
+---
+description: AutoTasker project overview and two-tier agent topology
+alwaysApply: true
+---
+
+# AutoTasker — Architecture
+
+**AutoTasker** is a two-tier agentic SaaS monorepo. Users describe repetitive tasks in chat; a synchronous **Meta-Agent** (Tier 1) checks feasibility against a strict Tool Registry, designs an SOP, and persists it as a draft Worker. A scheduled **Worker Agent** (Tier 2) is then compiled per execution from that SOP and runs autonomously via Inngest.
+
+Status: **Phase 1 MVP scaffold**. The Tier-1 graph is fully wired; the Tier-2 worker is a deterministic step-loop stub. Auth, OAuth tools, Inngest dynamic registration, and Browserbase are tracked in `docs/ROADMAP.md`.
+
+## Repo layout
+
+```
+frontend/   Next.js 15 App Router dashboard (The Forge + My Agents)
+backend/    Python 3.12 FastAPI + LangGraph package (autotasker_backend)
+infra/      Supabase SQL migrations, Inngest function stubs
+docs/       Roadmap and design notes
+```
+
+## Two-tier agent topology
+
+The whole product is built around **two completely separate LangGraph `StateGraph` instances** that share *only* the SOP JSON document persisted in Supabase. They have distinct state schemas, distinct execution contexts, and live in different routers.
+
+### Tier 1 — Meta-Agent (`backend/src/autotasker_backend/graphs/architect.py`)
+
+```
+intake → feasibility → [reject | architect → persist] → END
+```
+
+- Runs synchronously inside a FastAPI request.
+- State: `ArchitectState` (`graphs/state.py`) — TypedDict with an `add_messages` reducer on `messages`.
+- Streamed to the frontend via `graph.astream(stream_mode="updates")` in `api/chat.py`.
+
+### Tier 2 — Worker (`backend/src/autotasker_backend/graphs/worker.py`)
+
+```
+plan → tool_call → observe → (loop ≤ recursion_limit) → summarize → END
+```
+
+- Compiled **per execution** from a stored SOP via `build_worker_graph(sop)`.
+- Tool dispatch goes through the same `REGISTRY` the Meta-Agent uses for its manifest — there is one Tool Registry, both tiers consume it.
+- Invoked from `api/inngest.py` (`POST /inngest/execute`), which writes a row to `execution_logs` before and after the run.
+
+## The SOP contract (`backend/src/autotasker_backend/schemas/sop.py`)
+
+The `SOP` Pydantic model is the **only** thing the two tiers share. It is:
+
+- Versioned (`schema_version: Literal["1.0"]`).
+- Strict (`extra="forbid"`) — unknown keys are rejected so the Worker never encounters undocumented fields.
+- Self-validating: duplicate step ids, malformed cron expressions, and out-of-range execution ceilings all raise at construction time.
+- Persisted to `agents.sop` (jsonb) and indexed by `agents.required_tools` (text[]) for capability filtering.
+
+When evolving the SOP shape, bump `schema_version` and add a migration path — the worker reads SOPs that may have been written months earlier.
+
+## Conventions worth preserving
+
+- **Modern LangGraph only** — `StateGraph`, `add_messages`, `with_structured_output`, `astream(stream_mode=...)`. Do not introduce deprecated LangChain `Chain`/`LLMChain` constructs.
+- **Pydantic v2 strict** — every cross-boundary model uses `ConfigDict(extra="forbid")`. Do not loosen this.
+- **Fail fast on config** — `core/config.py::Settings` validates required env vars at process start, not at first use.
+- **Repository pattern over Supabase** — LangGraph nodes never import the Supabase SDK directly. They go through `db/repositories.py`.

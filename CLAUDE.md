@@ -2,105 +2,168 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+## Project
 
-AuraCor is a Next.js 16 personal color analysis app (coloração pessoal) implementing the **12-season color theory**:
-- 4 main seasons (Primavera, Verão, Outono, Inverno) × 3 sub-variations each
-- Two analysis methods: questionnaire-based and AI photo analysis (GPT-4o Vision)
+**AutoTasker** is a two-tier agentic SaaS monorepo. Users describe repetitive tasks in chat; a synchronous **Meta-Agent** (Tier 1) checks feasibility against a strict Tool Registry, designs an SOP, and persists it as a draft Worker. A scheduled **Worker Agent** (Tier 2) is then compiled per execution from that SOP and runs autonomously via Inngest.
 
-**Language:** All UI and content is in Portuguese (pt-BR).
+Status: **Phase 4 hardened MVP**. Tier-1 graph, Supabase auth end-to-end, LLM-driven Tier-2 worker, rate limiting, CI, and error sanitization are all wired. OAuth tools, Inngest dynamic registration, and Browserbase are tracked in `docs/ROADMAP.md`.
 
-## Commands
+## Repo layout
+
+```
+frontend/   Next.js 15 App Router dashboard (The Forge + My Agents)
+backend/    Python 3.12 FastAPI + LangGraph package (autotasker_backend)
+infra/      Supabase SQL migrations, Inngest function stubs
+docs/       Roadmap and design notes
+```
+
+## Common commands
+
+### Backend (Python 3.12+)
 
 ```bash
-npm run dev          # Start development server (Turbopack)
-npm run build        # Production build
-npm start            # Run production server
-npm run lint         # ESLint
-npm test             # Run Jest tests
-npm run test:watch   # Jest watch mode
+cd backend
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env                                 # fill in real secrets
+
+uvicorn autotasker_backend.main:app --reload --port 8000
+
+pytest                                               # all tests
+pytest tests/test_sop_schema.py                      # single file
+pytest tests/test_sop_schema.py::test_sop_round_trip # single test
+pytest tests/test_worker_graph.py -v                 # worker (uses scripted LLM double)
+ruff check src tests
+mypy src
 ```
 
-## Architecture
+OpenAPI docs at <http://localhost:8000/docs> when running.
 
-### User Flows
+### Frontend (Node 20+)
 
-**Questionnaire Path:**
-```
-/ → /questionario → calculateSeason(answers) → /resultado?estacao=X&source=questionario
-```
-
-**Photo Analysis Path:**
-```
-/ → /analise-foto → POST /api/analyze → analyzePhoto() → /resultado?estacao=X&source=foto&confidence=Y
-```
-
-### Core Files
-
-**lib/color-seasons.ts** - Main database and logic (DO NOT MODIFY):
-- `seasons: Record<SubSeason, SeasonData>` - 12 season definitions with palettes, tips, celebrities
-- `questions: Question[]` - 10 questions (7 basic + 3 refinement) with point-based scoring
-- `calculateSeason(answers)` → SubSeason - Primary calculation function
-- `calculateParentSeason(answers)` → ParentSeason - Helper for 4-season detection
-
-**lib/openai.ts** - GPT-4o Vision integration:
-- `analyzePhoto(base64Image)` → `{ season, confidence, undertone, contrast, details }`
-- `mapToSubSeason(parentSeason, intensity)` - Maps AI output to SubSeason
-
-### Type System
-
-```typescript
-type SubSeason = 'primavera-quente' | 'primavera-clara' | 'primavera-brilhante'
-               | 'verao-suave' | 'verao-claro' | 'verao-frio'
-               | 'outono-suave' | 'outono-quente' | 'outono-profundo'
-               | 'inverno-profundo' | 'inverno-frio' | 'inverno-brilhante';
-
-type ParentSeason = 'primavera' | 'verao' | 'outono' | 'inverno';
-type Season = SubSeason; // Legacy alias
+```bash
+cd frontend
+npm install
+cp .env.local.example .env.local
+npm run dev          # Next.js dev server on :3000
+npm run build
+npm run lint
+npm run typecheck          # tsc --noEmit
+npm run types:generate     # regenerate src/lib/types-generated.ts from FastAPI /openapi.json
 ```
 
-### Do Not Modify
+The frontend talks to FastAPI **only** through the Next.js rewrite at `/api/backend/*` (configured in `frontend/next.config.ts`). The browser never sees the backend origin directly. `BACKEND_URL` env var controls the rewrite target.
 
-- `lib/color-seasons.ts` - Core 965-line database
-- `components/SeasonCard.tsx` - Main result card component
-- `components/Header.tsx` - Navigation component
+### Database
 
-## Key Patterns
+Apply migrations via the Supabase SQL editor or CLI:
 
-**Season Calculation:**
-1. Sum points from answers for each of 4 parent seasons
-2. Calculate subPoints (light/bright/soft/deep) for intensity
-3. Map parent + dominant intensity → specific SubSeason
-
-**State Management:**
-- URL query params for cross-page state (stateless, shareable)
-- No global state library - React hooks only
-
-**OpenAI Integration:**
-- Lazy client initialization (avoids build-time errors without API key)
-- Structured JSON prompts with regex extraction and fallback
-
-## Stack
-
-- Next.js 16 with App Router and Turbopack
-- React 19, TypeScript 5
-- Tailwind CSS 4 (`@tailwindcss/postcss`)
-- shadcn/ui components (Radix UI primitives)
-- next-themes for dark mode (class strategy)
-- next-pwa for PWA support
-- Jest 30 + ts-jest for testing
-
-## Environment Variables
-
-Required in `.env.local` for photo analysis:
-```
-OPENAI_API_KEY=sk-...
+```bash
+supabase db push   # picks up infra/supabase/migrations/0001_init.sql
 ```
 
-## Testing
+## Architecture — the parts that span multiple files
 
-Tests in `lib/color-seasons.test.ts` verify:
-- Structure: 12 sub-seasons, 3 per parent, all required fields
-- Palettes: exactly 12 valid hex colors per season
-- Calculations: parent season and sub-season determination
-- Content: Portuguese text validation
+### Two-tier agent topology
+
+The whole product is built around **two completely separate LangGraph `StateGraph` instances** that share *only* the SOP JSON document persisted in Supabase. They have distinct state schemas, distinct execution contexts, and live in different routers.
+
+**Tier 1 — Meta-Agent (`backend/src/autotasker_backend/graphs/architect.py`)**
+
+```
+intake → feasibility → [reject | architect → persist] → END
+```
+
+- Runs synchronously inside a FastAPI request.
+- State: `ArchitectState` (`graphs/state.py`) — TypedDict with an `add_messages` reducer on `messages`.
+- The **Feasibility Gate** is a *deterministic-then-LLM* design: `feasibility_node` builds its system prompt from `REGISTRY.manifest()` (the **single source of truth** for platform capabilities), the LLM emits a `FeasibilityReport` via `with_structured_output(...)`, and any hallucinated tool ids are stripped before the conditional edge runs. Always preserve this filter when modifying the node.
+- The **Architect** node uses `with_structured_output(SOP)` so an invalid SOP raises *before* `persist_node` ever touches Supabase. This guarantee is load-bearing — do not weaken it.
+- Streamed to the frontend via `graph.astream(stream_mode="updates")` in `api/chat.py`.
+
+**Tier 2 — Worker (`backend/src/autotasker_backend/graphs/worker.py`)**
+
+```
+plan → tool_call → observe → (loop ≤ recursion_limit) → summarize → END
+```
+
+- Compiled **per execution** from a stored SOP via `build_worker_graph(sop)`. The compiled graph carries the SOP's `recursion_limit` via `.with_config({"recursion_limit": ...})`.
+- Honours `SOP.step_timeout_ms` via `asyncio.wait_for` per step.
+- Tool dispatch goes through the same `REGISTRY` the Meta-Agent uses for its manifest — there is one Tool Registry, both tiers consume it.
+- Invoked from `api/inngest.py` (`POST /inngest/execute`), which writes a row to `execution_logs` before and after the run.
+
+### The SOP contract (`schemas/sop.py`)
+
+The `SOP` Pydantic model is the **only** thing the two tiers share. It is:
+
+- Versioned (`schema_version: Literal["1.0"]`).
+- Strict (`extra="forbid"`) — unknown keys are rejected so the Worker never encounters undocumented fields.
+- Self-validating: duplicate step ids, malformed cron expressions, and out-of-range execution ceilings all raise at construction time.
+- Persisted to `agents.sop` (jsonb) and indexed by `agents.required_tools` (text[]) for capability filtering.
+
+When evolving the SOP shape, bump `schema_version` and add a migration path — the worker reads SOPs that may have been written months earlier.
+
+### Tool Registry (`tools/registry.py`)
+
+A single module-level `REGISTRY = ToolRegistry()` singleton. Tools self-register at import time by calling `REGISTRY.register(ToolSpec(...))` at module scope. The registry is loaded into the FastAPI app via `from . import tools` in `main.py`, which triggers `tools/__init__.py` to import each tool module.
+
+**To add a new tool:**
+
+1. Create `backend/src/autotasker_backend/tools/<your_tool>.py`.
+2. Define a Pydantic `*Input` schema and an `async def _handler(raw_inputs: dict) -> dict`.
+3. Call `REGISTRY.register(ToolSpec(...))` at module scope.
+4. Re-export it from `tools/__init__.py` so the import side-effect runs at startup.
+
+No further wiring is required — the Meta-Agent's manifest is regenerated from the registry on every chat request, and the Worker looks up handlers by `tool_id`.
+
+### Strict separation of concerns (FastAPI routers)
+
+- `api/chat.py` — synchronous chat streaming (Tier 1). Compiles `_ARCHITECT_GRAPH` once at import.
+- `api/agents.py` — CRUD over saved agents (used by the My Agents UI).
+- `api/inngest.py` — async worker dispatch (Tier 2). Loads agent → compiles worker graph → records start/finish in `execution_logs`.
+- `api/health.py` — liveness / readiness.
+
+These four routers must stay independent. Do not import chat code from inngest or vice versa.
+
+### LLM provider abstraction (`llm/provider.py`)
+
+Both tiers go through `get_meta_agent_llm()` / `get_worker_llm()`. Selection by model id prefix: `claude-*` → `ChatAnthropic`, anything else → `ChatOpenAI`. To swap providers, change the `META_AGENT_MODEL` / `WORKER_MODEL` env vars — no code changes.
+
+Default models: `claude-opus-4-6` (Meta-Agent) and `claude-haiku-4-5-20251001` (Worker). The legacy SKUs in the original spec (`claude-3.7-sonnet`, `claude-3.5-haiku`, `o3-mini`, `gpt-4o-mini`) are intentionally not the defaults.
+
+### Database & RLS (`infra/supabase/migrations/0001_init.sql`)
+
+Three tables: `users` (mirror of `auth.users`), `agents` (SOPs + triggers + status), `execution_logs` (per-run output, errors, token/cost accounting with a generated `duration_ms`).
+
+- `users` is auto-populated on signup by the `on_auth_user_created` trigger.
+- `execution_logs.finished_at` updates bump `agents.last_run_at` via `on_execution_log_finished`.
+- All three tables have RLS scoped to `auth.uid()`. Backend writes use the **service-role** key (RLS bypassed) via `db/client.py::get_supabase_admin`. The browser must never see the service-role key.
+- `execution_logs` has no insert/update RLS policy — only the service role writes there.
+
+### Frontend ↔ backend wiring
+
+- `frontend/src/lib/types.ts` is **hand-written** to mirror the Pydantic schemas in `backend/src/autotasker_backend/schemas/`. Phase 2 will generate this from the FastAPI OpenAPI schema. Until then, keep them in sync manually whenever a schema changes.
+- `frontend/src/lib/api.ts::streamForge()` is an async generator that parses SSE frames into `ForgeEvent`s. The event shapes are union-typed in `types.ts` and produced in `backend/src/autotasker_backend/api/chat.py::_stream_architect`. **These two files must stay in sync.**
+- `forge-chat.tsx` consumes the SSE stream and renders both a chat bubble list and a "pipeline rail" showing each graph node as it executes.
+
+### Production hardening (Phase 4)
+
+- **Rate limiting** — `core/rate_limit.py::limiter` is an in-memory `slowapi.Limiter` keyed by IP. `/chat/stream` is capped at `10/minute`, `/inngest/execute` at `30/minute`. Installed as `SlowAPIMiddleware` in `main.py`. When you add a hot route, decorate it `@limiter.limit(...)` **and** declare a `request: Request` parameter so slowapi can read the client IP.
+- **Client-safe errors** — every bare `except Exception` in a router or graph node funnels through `core/errors.py::client_safe_error`, which maps known exception classes to stable user-facing messages and attaches a 12-char trace id for support lookups. Never yield `str(exc)` to the client directly.
+- **SSE cancellation** — `_stream_architect` re-raises `asyncio.CancelledError` so aborted fetches don't spam tracebacks. Do the same in any new long-lived async generator.
+- **Auth** — every FastAPI route that touches user data uses `Depends(get_current_user_id)` from `core/auth.py`. The Inngest webhook uses `Depends(require_inngest_secret)` instead. The frontend attaches the Supabase session's `access_token` as a Bearer header in `lib/api.ts::getAuthHeader()`. `DEMO_USER_ID` is gone.
+- **Ownership 404s** — `api/agents.py::_load_owned_or_404` always returns 404 (not 403) when the authenticated user doesn't own a row, so row existence doesn't leak across users.
+- **Bounded UI state** — `components/forge-chat.tsx::appendBounded` caps `messages` and `pipeline` at 200 entries so a long session can't blow up the client.
+- **OpenAPI types drift check** — `npm run types:generate` regenerates `src/lib/types-generated.ts` from `/openapi.json`. Treat it as a parallel check on the hand-written `src/lib/types.ts`; diffing the two catches silent schema drift until Phase 2b replaces the hand-written file entirely.
+- **CI** — `.github/workflows/ci.yml` runs ruff + mypy + pytest on every push, and Next.js lint + typecheck + build alongside. Supabase env vars for the frontend build step are dummy values; CI does not need real credentials.
+
+## Conventions worth preserving
+
+- **Modern LangGraph only** — `StateGraph`, `add_messages`, `with_structured_output`, `astream(stream_mode=...)`. Do not introduce deprecated LangChain `Chain`/`LLMChain` constructs.
+- **Pydantic v2 strict** — every cross-boundary model uses `ConfigDict(extra="forbid")`. Do not loosen this.
+- **Fail fast on config** — `core/config.py::Settings` validates required env vars at process start, not at first use. The `require_*` helper methods raise with actionable messages.
+- **Repository pattern over Supabase** — LangGraph nodes never import the Supabase SDK directly. They go through `db/repositories.py`.
+- **TypeScript strict mode** — `tsconfig.json` has `strict: true` and `experimental.typedRoutes: true`. Route props must use `Route` from `next`.
+
+## Branch policy (per session instructions)
+
+Development on this branch happens on `claude/autotasker-mvp-init-HBIsc`. Push there with `git push -u origin claude/autotasker-mvp-init-HBIsc`. Do not push to `main` and do not open PRs unless explicitly asked.

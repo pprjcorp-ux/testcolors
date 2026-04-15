@@ -1,0 +1,34 @@
+---
+description: Supabase schema, RLS, and migration rules
+globs: infra/supabase/**/*.sql
+alwaysApply: false
+---
+
+# Database & RLS
+
+The schema lives in `infra/supabase/migrations/`. Three tables:
+
+- **`users`** — mirror of `auth.users`. Auto-populated by the `on_auth_user_created` trigger when someone signs up via Supabase Auth.
+- **`agents`** — SOPs + triggers + status. The `sop` column is `jsonb`; `required_tools` is a `text[]` GIN index for capability filtering.
+- **`execution_logs`** — per-run output, errors, token/cost accounting with a *generated* `duration_ms` column. The `on_execution_log_finished` trigger bumps `agents.last_run_at` whenever a log row's `finished_at` updates.
+
+## RLS rules — non-negotiable
+
+- All three tables have RLS scoped to `auth.uid()`.
+- Backend writes use the **service-role** key (RLS bypassed) via `db/client.py::get_supabase_admin`. The browser must never see the service-role key.
+- `execution_logs` has **no insert/update RLS policy** — only the service role writes there. Users can `select` their own log rows but cannot create or modify them.
+- Never add an `INSERT WITH CHECK (auth.uid() = ...)` policy to `execution_logs` — that would let clients fabricate execution history.
+
+## Adding a migration
+
+1. Create `infra/supabase/migrations/000N_<name>.sql` with the next sequential number.
+2. Wrap enum creation in `do $$ begin ... exception when duplicate_object then null; end $$;` so re-running is idempotent.
+3. Use `create table if not exists` and `drop trigger if exists ... before create trigger ...` so migrations are replay-safe.
+4. RLS-enable any new user-facing table immediately and add per-action policies — never leave a table RLS-disabled "for now".
+5. If you change `agents.sop` shape, bump `SOP.schema_version` in `backend/src/autotasker_backend/schemas/sop.py` and add a Python-side migration helper. The worker reads SOPs that may have been written months earlier.
+
+## Apply migrations
+
+```bash
+supabase db push   # picks up infra/supabase/migrations/0001_init.sql
+```
