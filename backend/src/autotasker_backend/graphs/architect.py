@@ -263,9 +263,12 @@ async def persist_node(state: ArchitectState) -> ArchitectState:
     )
     try:
         agent = repo.create(user_id=UUID(user_id), payload=payload)
-    except Exception as exc:  # noqa: BLE001 — surface to user
+    except Exception:  # noqa: BLE001 — full traceback stays in logs only
         log.exception("architect.persist_failed")
-        return {"status": "error", "error": f"Failed to save agent: {exc}"}
+        return {
+            "status": "error",
+            "error": "Failed to save agent. Our team has been notified.",
+        }
 
     return {
         "status": "done",

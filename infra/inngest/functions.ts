@@ -18,6 +18,7 @@ export const inngest = new Inngest({
 });
 
 interface ExecuteAgentEvent {
+  id: string;
   data: {
     agent_id: string;
   };
@@ -35,7 +36,10 @@ export const executeAgent = inngest.createFunction(
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           agent_id: event.data.agent_id,
-          run_id: event.data.agent_id,
+          // Inngest assigns a unique id to every event delivery — pass
+          // it through so cross-system tracing correlates the FastAPI
+          // log row with the Inngest run page.
+          run_id: event.id,
         }),
       });
       if (!res.ok) {

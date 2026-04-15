@@ -18,7 +18,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.logging import get_logger
 from ..db.repositories import AgentRepository, ExecutionLogRepository
@@ -30,6 +30,8 @@ log = get_logger(__name__)
 
 
 class ExecuteAgentEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     agent_id: UUID
     run_id: str | None = Field(None, description="Inngest run id for tracing.")
 
@@ -57,10 +59,13 @@ async def execute_agent(event: ExecuteAgentEvent) -> ExecutionLogRead:
             output=summary,
             error_message=summary.get("error"),
         )
-    except Exception as exc:  # noqa: BLE001
-        log.exception("worker.crashed")
+    except Exception as exc:  # noqa: BLE001 — full traceback stays in logs only
+        log.exception("worker.crashed", log_id=str(log_row.id))
+        # Store only the exception class name in the DB row — the raw
+        # message could leak credentials embedded in provider errors
+        # (e.g. psycopg connection strings, httpx response bodies).
         return logs.finish(
             log_id=log_row.id,
             status=ExecutionStatus.FAILED,
-            error_message=str(exc),
+            error_message=f"Worker crashed: {type(exc).__name__}",
         )

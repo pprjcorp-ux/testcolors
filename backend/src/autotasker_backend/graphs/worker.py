@@ -18,13 +18,16 @@ LLM-driven plan/observe loop using the worker LLM.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
 from ..core.logging import get_logger
 from ..schemas.sop import SOP
 from ..tools.registry import REGISTRY
+
+if TYPE_CHECKING:
+    from langchain_core.runnables import Runnable
 
 log = get_logger(__name__)
 
@@ -103,8 +106,12 @@ def _route_after_observe(state: WorkerState) -> str:
     return "tool_call"
 
 
-def build_worker_graph(sop: SOP):
+def build_worker_graph(sop: SOP) -> "Runnable[dict[str, Any], dict[str, Any]]":
     """Compile a Worker graph for the given SOP.
+
+    Returns a ``Runnable`` — specifically a ``RunnableBinding`` wrapping
+    the compiled ``CompiledStateGraph``, because ``.with_config(...)``
+    produces a binding. Callers only need the ``.ainvoke()`` surface.
 
     The SOP is captured in the compiled graph's default state so the
     Inngest function only has to call ``graph.ainvoke({"sop": sop})``.

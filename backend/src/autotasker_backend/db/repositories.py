@@ -6,6 +6,7 @@ dict-shaped responses and our Pydantic schemas.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -98,9 +99,12 @@ class ExecutionLogRepository:
         tokens_out: int = 0,
         cost_usd: float = 0.0,
     ) -> ExecutionLogRead:
+        # PostgREST serialises this dict to JSON, so the value must be a
+        # real ISO-8601 string — passing the literal "now()" would be
+        # inserted verbatim and rejected as an invalid timestamptz.
         update = {
             "status": status.value,
-            "finished_at": "now()",
+            "finished_at": datetime.now(UTC).isoformat(),
             "output": output,
             "error_message": error_message[:4000] if error_message else None,
             "tokens_in": tokens_in,

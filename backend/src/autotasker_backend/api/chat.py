@@ -18,7 +18,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.logging import get_logger
 from ..graphs.architect import build_architect_graph
@@ -32,6 +32,8 @@ _ARCHITECT_GRAPH = build_architect_graph()
 
 
 class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     user_id: str = Field(..., description="Authenticated Supabase user id (UUID).")
     thread_id: str | None = None
     message: str = Field(..., min_length=1, max_length=4000)
@@ -84,9 +86,14 @@ async def _stream_architect(request: ChatRequest) -> AsyncIterator[str]:
                     payload["error"] = partial["error"]
 
                 yield _sse(payload)
-    except Exception as exc:  # noqa: BLE001 — surface to client
+    except Exception:  # noqa: BLE001 — full traceback stays in logs only
         log.exception("chat.stream_failed")
-        yield _sse({"type": "error", "error": str(exc)})
+        yield _sse(
+            {
+                "type": "error",
+                "error": "The Architect ran into an internal error. Please try again.",
+            }
+        )
 
     yield "data: [DONE]\n\n"
 
