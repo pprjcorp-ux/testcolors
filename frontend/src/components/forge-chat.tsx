@@ -35,9 +35,6 @@ interface PipelineEvent {
   detail?: string;
 }
 
-// In a real app this comes from the Supabase session.
-const DEMO_USER_ID = "00000000-0000-0000-0000-000000000000";
-
 export function ForgeChat() {
   const [messages, setMessages] = useState<ChatBubble[]>([]);
   const [pipeline, setPipeline] = useState<PipelineEvent[]>([]);
@@ -64,7 +61,6 @@ export function ForgeChat() {
 
     try {
       for await (const event of streamForge({
-        userId: DEMO_USER_ID,
         threadId,
         message: text,
         signal: abortRef.current.signal,

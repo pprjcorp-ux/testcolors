@@ -1,7 +1,10 @@
 import Link from "next/link";
 import type { Route } from "next";
+import { redirect } from "next/navigation";
 import { Bot, Hammer, Sparkles } from "lucide-react";
 
+import { SignOutButton } from "@/components/sign-out-button";
+import { getSupabaseServer } from "@/lib/supabase-server";
 import { cn } from "@/lib/utils";
 
 interface NavItem {
@@ -15,11 +18,22 @@ const NAV: NavItem[] = [
   { href: "/agents", label: "My Agents", icon: Bot },
 ];
 
-export default function DashboardLayout({
+export default async function DashboardLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  // Server-side session check. Middleware also enforces this, but we
+  // re-check here so the layout can render the user's email without
+  // an extra round-trip.
+  const supabase = await getSupabaseServer();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) {
+    redirect("/login");
+  }
+
   return (
     <div className="flex min-h-screen">
       <aside className="hidden w-64 shrink-0 border-r bg-muted/30 md:flex md:flex-col">
@@ -43,8 +57,11 @@ export default function DashboardLayout({
             </Link>
           ))}
         </nav>
-        <div className="border-t p-4 text-xs text-muted-foreground">
-          Phase 1 MVP · v0.1.0
+        <div className="border-t p-4">
+          <div className="mb-2 truncate text-xs text-muted-foreground" title={user.email ?? undefined}>
+            {user.email}
+          </div>
+          <SignOutButton />
         </div>
       </aside>
 

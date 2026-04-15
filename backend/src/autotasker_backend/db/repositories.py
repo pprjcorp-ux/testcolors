@@ -52,10 +52,18 @@ class AgentRepository:
         )
         return [AgentRead.model_validate(r) for r in (result.data or [])]
 
-    def get(self, agent_id: UUID) -> AgentRead | None:
-        result = (
-            self._client.table(self.TABLE).select("*").eq("id", str(agent_id)).limit(1).execute()
-        )
+    def get(self, agent_id: UUID, *, user_id: UUID | None = None) -> AgentRead | None:
+        """Fetch an agent by id.
+
+        When ``user_id`` is provided, the lookup is scoped to that
+        user at the query level — even though the service-role client
+        bypasses RLS, we still filter server-side so a stray call
+        cannot accidentally return someone else's row.
+        """
+        query = self._client.table(self.TABLE).select("*").eq("id", str(agent_id))
+        if user_id is not None:
+            query = query.eq("user_id", str(user_id))
+        result = query.limit(1).execute()
         if not result.data:
             return None
         return AgentRead.model_validate(result.data[0])

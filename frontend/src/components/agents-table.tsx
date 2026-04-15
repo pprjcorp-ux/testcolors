@@ -29,8 +29,6 @@ import {
 import { api } from "@/lib/api";
 import type { Agent, AgentStatus, ExecutionLog } from "@/lib/types";
 
-const DEMO_USER_ID = "00000000-0000-0000-0000-000000000000";
-
 const STATUS_VARIANT: Record<AgentStatus, BadgeProps["variant"]> = {
   draft: "secondary",
   active: "success",
@@ -53,7 +51,7 @@ export function AgentsTable() {
     setLoading(true);
     setError(null);
     try {
-      const agents = await api.listAgents(DEMO_USER_ID);
+      const agents = await api.listAgents();
       const enriched: Row[] = await Promise.all(
         agents.map(async (agent) => {
           try {

@@ -17,9 +17,10 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..core.auth import require_inngest_secret
 from ..core.logging import get_logger
 from ..db.repositories import AgentRepository, ExecutionLogRepository
 from ..graphs.worker import build_worker_graph
@@ -36,7 +37,11 @@ class ExecuteAgentEvent(BaseModel):
     run_id: str | None = Field(None, description="Inngest run id for tracing.")
 
 
-@router.post("/execute", response_model=ExecutionLogRead)
+@router.post(
+    "/execute",
+    response_model=ExecutionLogRead,
+    dependencies=[Depends(require_inngest_secret)],
+)
 async def execute_agent(event: ExecuteAgentEvent) -> ExecutionLogRead:
     agents = AgentRepository()
     logs = ExecutionLogRepository()

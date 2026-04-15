@@ -13,13 +13,14 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..core.auth import get_current_user_id
 from ..core.logging import get_logger
 from ..graphs.architect import build_architect_graph
 from ..graphs.state import ArchitectState
@@ -32,9 +33,15 @@ _ARCHITECT_GRAPH = build_architect_graph()
 
 
 class ChatRequest(BaseModel):
+    """Body of POST /chat/stream.
+
+    The caller's identity comes from the ``Authorization: Bearer <jwt>``
+    header — never from a client-supplied user_id — so a malicious
+    client cannot impersonate another user by editing the JSON body.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(..., description="Authenticated Supabase user id (UUID).")
     thread_id: str | None = None
     message: str = Field(..., min_length=1, max_length=4000)
 
@@ -43,11 +50,13 @@ def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, default=str)}\n\n"
 
 
-async def _stream_architect(request: ChatRequest) -> AsyncIterator[str]:
+async def _stream_architect(
+    request: ChatRequest, user_id: UUID
+) -> AsyncIterator[str]:
     thread_id = request.thread_id or str(uuid4())
     initial_state: ArchitectState = {
         "messages": [HumanMessage(content=request.message)],
-        "user_id": request.user_id,
+        "user_id": str(user_id),
         "thread_id": thread_id,
         "status": "intake",
         "scratchpad": {},
@@ -99,11 +108,12 @@ async def _stream_architect(request: ChatRequest) -> AsyncIterator[str]:
 
 
 @router.post("/stream")
-async def chat_stream(request: ChatRequest) -> StreamingResponse:
-    if not request.user_id:
-        raise HTTPException(status_code=401, detail="user_id is required")
+async def chat_stream(
+    request: ChatRequest,
+    user_id: UUID = Depends(get_current_user_id),
+) -> StreamingResponse:
     return StreamingResponse(
-        _stream_architect(request),
+        _stream_architect(request, user_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

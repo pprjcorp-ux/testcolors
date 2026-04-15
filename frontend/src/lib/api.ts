@@ -2,15 +2,36 @@
  * Thin client over the FastAPI backend. All requests go through the
  * Next.js rewrite at /api/backend/* so the browser never sees the
  * backend origin directly.
+ *
+ * Every call reads the current Supabase session and attaches the
+ * user's access token as a Bearer header. The backend validates it
+ * via the `get_current_user_id` FastAPI dependency.
  */
 
+import { getSupabaseBrowser } from "./supabase";
 import type { Agent, ExecutionLog, ForgeEvent } from "./types";
 
 const BASE = "/api/backend";
 
+async function getAuthHeader(): Promise<Record<string, string>> {
+  const supabase = getSupabaseBrowser();
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) {
+    throw new Error("Not authenticated — please sign in again.");
+  }
+  return { Authorization: `Bearer ${session.access_token}` };
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const authHeaders = await getAuthHeader();
   const res = await fetch(`${BASE}${path}`, {
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers: {
+      "content-type": "application/json",
+      ...authHeaders,
+      ...(init?.headers ?? {}),
+    },
     cache: "no-store",
     ...init,
   });
@@ -22,8 +43,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  listAgents(userId: string): Promise<Agent[]> {
-    return request<Agent[]>(`/agents?user_id=${encodeURIComponent(userId)}`);
+  listAgents(): Promise<Agent[]> {
+    return request<Agent[]>(`/agents`);
   },
   getAgent(agentId: string): Promise<Agent> {
     return request<Agent>(`/agents/${agentId}`);
@@ -44,16 +65,15 @@ export const api = {
  * Yields parsed `ForgeEvent`s as they arrive.
  */
 export async function* streamForge(input: {
-  userId: string;
   threadId?: string;
   message: string;
   signal?: AbortSignal;
 }): AsyncGenerator<ForgeEvent, void, void> {
+  const authHeaders = await getAuthHeader();
   const res = await fetch(`${BASE}/chat/stream`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeaders },
     body: JSON.stringify({
-      user_id: input.userId,
       thread_id: input.threadId,
       message: input.message,
     }),
