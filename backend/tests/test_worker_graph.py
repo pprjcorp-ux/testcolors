@@ -1,23 +1,65 @@
 """End-to-end smoke test for the Tier-2 Worker graph.
 
-Uses only ``mock_email`` — a synchronous tool with no network
-dependency — so the test runs without any env vars or LLM provider.
+Uses a fake worker LLM so the test runs without any env vars or
+network calls. The fake returns a scripted sequence of ``AIMessage``
+responses: first the plan, then a tool call, then a final answer.
 """
 
 from __future__ import annotations
 
-import pytest
+from collections.abc import Sequence
+from typing import Any
 
-from autotasker_backend.graphs.worker import build_worker_graph
+import pytest
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+
 from autotasker_backend.schemas.sop import SOP
 from autotasker_backend.tools import REGISTRY  # noqa: F401  registers built-ins
+
+
+class _ScriptedLLM(BaseChatModel):
+    """A test double that yields a fixed sequence of AIMessage replies."""
+
+    script: list[AIMessage] = []
+    cursor: int = 0
+
+    @property
+    def _llm_type(self) -> str:  # pragma: no cover
+        return "scripted"
+
+    def bind_tools(self, tools: Any, **_kwargs: Any) -> "_ScriptedLLM":  # type: ignore[override]
+        # bind_tools is a no-op for the test double — we already decide
+        # the responses ahead of time.
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        msg = self.script[self.cursor]
+        self.cursor += 1
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        return self._generate(messages, stop, run_manager, **kwargs)
 
 
 def _mock_email_sop() -> SOP:
     return SOP.model_validate(
         {
             "name": "Test email SOP",
-            "goal": "Send a single mock email.",
+            "goal": "Send a single mock email to the user.",
             "tools": [{"tool_id": "mock_email"}],
             "steps": [
                 {
@@ -36,80 +78,92 @@ def _mock_email_sop() -> SOP:
     )
 
 
+def _install_scripted_llm(monkeypatch: pytest.MonkeyPatch, script: Sequence[AIMessage]) -> None:
+    from autotasker_backend.graphs import worker as worker_module
+
+    llm = _ScriptedLLM(script=list(script))
+    monkeypatch.setattr(worker_module, "get_worker_llm", lambda: llm)
+
+
 @pytest.mark.asyncio
-async def test_worker_runs_single_step_sop():
+async def test_worker_plan_call_finish(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Re-import after monkeypatching via _install_scripted_llm.
+    from autotasker_backend.graphs.worker import build_worker_graph
+
+    _install_scripted_llm(
+        monkeypatch,
+        [
+            # plan_node
+            AIMessage(
+                content="1. Send the email via mock_email.",
+                usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            ),
+            # decide_node → tool call
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "mock_email",
+                        "args": {
+                            "to": "user@example.com",
+                            "subject": "Hi",
+                            "body": "Body.",
+                        },
+                        "id": "call_1",
+                    }
+                ],
+                usage_metadata={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+            ),
+            # decide_node → final answer (no tool calls)
+            AIMessage(
+                content="Email sent.",
+                usage_metadata={"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
+            ),
+        ],
+    )
+
     sop = _mock_email_sop()
     graph = build_worker_graph(sop)
     result = await graph.ainvoke({"sop": sop})
 
     summary = result["summary"]
     assert summary["ok"] is True
-    assert summary["step_count"] == 1
-    assert summary["error"] is None
-    observation = summary["observations"][0]
-    assert observation["tool_id"] == "mock_email"
-    assert observation["result"]["delivered"] is True
+    assert summary["answer"] == "Email sent."
+    assert summary["plan"].startswith("1.")
+    assert summary["step_count"] == 2  # two decide_node calls
+    assert summary["tokens_in"] == 28  # 20 + 8 (plan is pre-loop, not summed)
+    assert summary["tokens_out"] == 13  # 10 + 3
 
 
 @pytest.mark.asyncio
-async def test_worker_handles_missing_tool():
-    """A step pointing at an unknown tool should surface the error in the summary."""
-    sop = SOP.model_validate(
-        {
-            "name": "Broken SOP",
-            "goal": "Exercise the error path.",
-            "tools": [{"tool_id": "mock_email"}],
-            "steps": [
-                {
-                    "id": "bad",
-                    "description": "Call a tool that does not exist",
-                    "tool_id": "mock_email",
-                    "inputs": {"to": "", "subject": "", "body": ""},
-                }
-            ],
-            "trigger": {"type": "manual"},
-        }
+async def test_worker_handles_unknown_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    from autotasker_backend.graphs.worker import build_worker_graph
+
+    _install_scripted_llm(
+        monkeypatch,
+        [
+            # plan_node
+            AIMessage(content="Plan.", usage_metadata={"input_tokens": 5, "output_tokens": 2}),
+            # decide_node — hallucinates a tool id
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "nonexistent_tool", "args": {}, "id": "call_bad"}
+                ],
+                usage_metadata={"input_tokens": 5, "output_tokens": 2},
+            ),
+            # decide_node — after seeing the error, yields a final answer
+            AIMessage(
+                content="Could not complete task.",
+                usage_metadata={"input_tokens": 5, "output_tokens": 2},
+            ),
+        ],
     )
-    graph = build_worker_graph(sop)
-    result = await graph.ainvoke({"sop": sop})
 
-    # The mock_email input validation will raise for empty strings; the
-    # worker should capture that into the summary rather than raising.
-    summary = result["summary"]
-    assert summary["ok"] is False
-    assert summary["error"] is not None
-    assert "bad" in summary["error"]
-
-
-@pytest.mark.asyncio
-async def test_worker_skips_reasoning_only_step():
-    """A step without a tool_id should be marked skipped, not fail."""
-    sop = SOP.model_validate(
-        {
-            "name": "Mixed SOP",
-            "goal": "A thinking step followed by an email.",
-            "tools": [{"tool_id": "mock_email"}],
-            "steps": [
-                {"id": "think", "description": "Ponder the request"},
-                {
-                    "id": "send",
-                    "description": "Send the email",
-                    "tool_id": "mock_email",
-                    "inputs": {
-                        "to": "user@example.com",
-                        "subject": "Hi",
-                        "body": "Body.",
-                    },
-                },
-            ],
-            "trigger": {"type": "manual"},
-        }
-    )
+    sop = _mock_email_sop()
     graph = build_worker_graph(sop)
     result = await graph.ainvoke({"sop": sop})
 
     summary = result["summary"]
-    assert summary["ok"] is True
-    assert summary["step_count"] == 2
-    assert summary["observations"][0]["skipped"] == "reasoning_only"
-    assert summary["observations"][1]["tool_id"] == "mock_email"
+    assert summary["ok"] is True  # graph completed without raising
+    assert summary["answer"] == "Could not complete task."

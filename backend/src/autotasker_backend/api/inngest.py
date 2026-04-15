@@ -63,6 +63,8 @@ async def execute_agent(event: ExecuteAgentEvent) -> ExecutionLogRead:
             status=ExecutionStatus.SUCCESS if ok else ExecutionStatus.FAILED,
             output=summary,
             error_message=summary.get("error"),
+            tokens_in=int(summary.get("tokens_in", 0) or 0),
+            tokens_out=int(summary.get("tokens_out", 0) or 0),
         )
     except Exception as exc:  # noqa: BLE001 — full traceback stays in logs only
         log.exception("worker.crashed", log_id=str(log_row.id))
